@@ -125,7 +125,7 @@ runs:
         cp -r ${{ env.INSTALL_DIR }} ${{ env.INSTALL_PORTABLE_DIR }}  # cmake install on Windows is slow, let's just copy instead
         cmake --install ${{ env.BUILD_DIR }} --config ${{ inputs.build-type }} --prefix ${{ env.INSTALL_PORTABLE_DIR }} --component portable
 
-        Get-ChildItem ${{ env.INSTALL_PORTABLE_DIR }} -Recurse | ForEach FullName | Resolve-Path -Relative | %{ $_.TrimStart('.\') } | %{ $_.TrimStart('${{ env.INSTALL_PORTABLE_DIR }}') } | %{ $_.TrimStart('\') } | Out-File -FilePath ${{ env.INSTALL_DIR }}/manifest.txt
+        Get-ChildItem ${{ env.INSTALL_PORTABLE_DIR }} -Recurse | ForEach FullName | Resolve-Path -Relative | %{ $_.TrimStart('.\') } | %{ $_.TrimStart('${{ env.INSTALL_PORTABLE_DIR }}') } | %{ $_.TrimStart('\') } | Out-File -FilePath ${{ env.INSTALL_PORTABLE_DIR }}/manifest.txt
 
     - name: Package (installer)
       shell: pwsh
@@ -144,6 +144,14 @@ runs:
           exit 1
         }
         Expand-Archive -Path NSISPlugins\NScurl.zip -DestinationPath NSISPlugins\NScurl
+
+        if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) {
+            if (Test-Path "C:\Program Files (x86)\NSIS\makensis.exe") {
+                $env:PATH = "C:\Program Files (x86)\NSIS;$env:PATH"
+            } elseif (Test-Path "C:\Program Files\NSIS\makensis.exe") {
+                $env:PATH = "C:\Program Files\NSIS;$env:PATH"
+            }
+        }
 
         cd ${{ env.INSTALL_DIR }}
         makensis -NOCD "${{ github.workspace }}/${{ env.BUILD_DIR }}/program_info/win_install.nsi"

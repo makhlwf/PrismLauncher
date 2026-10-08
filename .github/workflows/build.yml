@@ -1,56 +1,59 @@
-name: Build
+name: Build and Release
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 on:
-  merge_group:
-    types: [checks_requested]
+  push:
+    branches:
+      - develop
+      - main
+    tags:
+      - "*"
   pull_request:
-  workflow_call:
-    inputs:
-      build-type:
-        description: Type of build (Debug or Release)
-        type: string
-        default: Debug
-      environment:
-        description: Deployment environment to run under
-        type: string
+    branches:
+      - develop
+      - main
   workflow_dispatch:
     inputs:
       build-type:
-        description: Type of build (Debug or Release)
+        description: "Type of build"
+        type: choice
+        options:
+          - Release
+          - Debug
+        default: Release
+      prerelease:
+        description: "Mark as pre-release"
+        type: boolean
+        default: false
+      tag_name:
+        description: "Custom tag name (leave blank for automatic)"
         type: string
-        default: Debug
+        default: ""
+      release_title:
+        description: "Custom release title (leave blank for automatic)"
+        type: string
+        default: ""
 
-permissions: {}
+permissions:
+  contents: write
+  id-token: write
+  packages: write
 
 jobs:
   build:
     name: Build (${{ matrix.artifact-name }})
 
-    environment: ${{ inputs.environment || '' }}
-
-    permissions:
-      contents: read
-      # Required for Azure Trusted Signing
-      id-token: write
-      # Required for vcpkg binary cache
-      packages: write
-
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
-            artifact-name: Linux
-            cmake-preset: linux
-            qt-version: 6.11.2
-
-          - os: ubuntu-24.04-arm
-            artifact-name: Linux-aarch64
-            cmake-preset: linux
+          - os: windows-2022
+            artifact-name: Windows-MSVC
+            cmake-preset: windows_msvc
+            vcvars-arch: amd64
             qt-version: 6.11.2
 
           - os: windows-2022
@@ -60,23 +63,10 @@ jobs:
             vcvars-arch: amd64_x86
             qt-version: 6.11.2
 
-          - os: windows-2022
-            artifact-name: Windows-MSVC
-            cmake-preset: windows_msvc
-            # TODO(@getchoo): This is the default in setup-dependencies/windows. Why isn't it working?!?!
-            vcvars-arch: amd64
-            qt-version: 6.11.2
-
           - os: windows-11-arm
             artifact-name: Windows-MSVC-arm64
             cmake-preset: windows_msvc
             vcvars-arch: arm64
-            qt-version: 6.11.2
-
-          - os: macos-26
-            artifact-name: macOS
-            cmake-preset: macos_universal
-            macosx-deployment-target: 13.0
             qt-version: 6.11.2
 
     runs-on: ${{ matrix.os }}
@@ -88,10 +78,8 @@ jobs:
     env:
       ARTIFACT_NAME: ${{ matrix.artifact-name }}-Qt6
       BUILD_PLATFORM: official
-      BUILD_TYPE: ${{ inputs.build-type || 'Debug' }}
+      BUILD_TYPE: ${{ inputs.build-type || 'Release' }}
       CMAKE_PRESET: ${{ matrix.cmake-preset }}
-
-      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macosx-deployment-target }}
 
     steps:
       ##
@@ -129,7 +117,7 @@ jobs:
         env:
           MSYS2_PATH_TYPE: inherit
         run: |
-          ctest --preset "$CMAKE_PRESET" --build-config "$BUILD_TYPE"
+          ctest --preset "$CMAKE_PRESET" --build-config "$BUILD_TYPE" --output-on-failure
 
       ##
       # PACKAGE
@@ -141,36 +129,7 @@ jobs:
         run: |
           echo "version=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Package (Linux)
-        if: ${{ runner.os == 'Linux' }}
-        uses: ./.github/actions/package/linux
-        with:
-          version: ${{ steps.short-version.outputs.version }}
-          build-type: ${{ steps.setup-dependencies.outputs.build-type }}
-          artifact-name: ${{ matrix.artifact-name }}
-          qt-version: ${{ steps.setup-dependencies.outputs.qt-version }}
-
-          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
-          gpg-private-key-id: ${{ secrets.GPG_PRIVATE_KEY_ID }}
-
-      - name: Package (macOS)
-        if: ${{ runner.os == 'macOS' }}
-        uses: ./.github/actions/package/macos
-        with:
-          version: ${{ steps.short-version.outputs.version }}
-          build-type: ${{ steps.setup-dependencies.outputs.build-type }}
-          artifact-name: ${{ matrix.artifact-name }}
-
-          apple-codesign-cert: ${{ secrets.APPLE_CODESIGN_CERT }}
-          apple-codesign-password: ${{ secrets.APPLE_CODESIGN_PASSWORD }}
-          apple-codesign-id: ${{ secrets.APPLE_CODESIGN_ID }}
-          apple-notarize-apple-id: ${{ secrets.APPLE_NOTARIZE_APPLE_ID }}
-          apple-notarize-team-id: ${{ secrets.APPLE_NOTARIZE_TEAM_ID }}
-          apple-notarize-password: ${{ secrets.APPLE_NOTARIZE_PASSWORD }}
-          sparkle-ed25519-key: ${{ secrets.SPARKLE_ED25519_KEY }}
-
       - name: Package (Windows)
-        if: ${{ runner.os == 'Windows' }}
         uses: ./.github/actions/package/windows
         env:
           CI_HAS_ACCESS_TO_AZURE: ${{ vars.CI_HAS_ACCESS_TO_AZURE || '' }}
@@ -183,3 +142,183 @@ jobs:
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+  release:
+    name: Create Release
+    needs: build
+    if: ${{ !cancelled() && !contains(needs.build.result, 'failure') && (github.event_name != 'pull_request') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Determine version and release info
+        id: info
+        shell: bash
+        run: |
+          # Read base version from CMakeLists.txt
+          BASE_VERSION=$(grep -E 'set\(Launcher_VERSION_NAME\s+"[0-9.]+"' CMakeLists.txt | head -n 1 | sed -E 's/.*"([0-9.]+)".*/\1/')
+          if [ -z "$BASE_VERSION" ]; then
+            BASE_VERSION="12.0.0"
+          fi
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          RUN_NUM="${{ github.run_number }}"
+
+          CUSTOM_TAG="${{ inputs.tag_name }}"
+          CUSTOM_TITLE="${{ inputs.release_title }}"
+
+          if [ -n "$CUSTOM_TAG" ]; then
+            TAG_NAME="$CUSTOM_TAG"
+            VERSION_STR="${CUSTOM_TAG#v}"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG_NAME="${{ github.ref_name }}"
+            VERSION_STR="${TAG_NAME#v}"
+          else
+            # Automatic distinct tag per build
+            TAG_NAME="v${BASE_VERSION}-build.${RUN_NUM}"
+            VERSION_STR="${BASE_VERSION}"
+          fi
+
+          if [ -n "$CUSTOM_TITLE" ]; then
+            TITLE="$CUSTOM_TITLE"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            TITLE="Prism Launcher ${{ github.ref_name }}"
+          else
+            TITLE="Prism Launcher ${BASE_VERSION} (Build ${RUN_NUM})"
+          fi
+
+          # Prerelease logic
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.prerelease }}" = "true" ]; then
+            IS_PRERELEASE="true"
+          elif [ "${{ github.ref_type }}" = "tag" ] && echo "${{ github.ref_name }}" | grep -qE "(-|alpha|beta|rc|pre)"; then
+            IS_PRERELEASE="true"
+          else
+            IS_PRERELEASE="false"
+          fi
+
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION_STR" >> "$GITHUB_OUTPUT"
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$IS_PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+          echo "run_num=$RUN_NUM" >> "$GITHUB_OUTPUT"
+
+      - name: Package Windows release assets
+        id: package
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          VERSION="${{ steps.info.outputs.version }}"
+
+          echo "Downloaded artifacts:"
+          ls -la artifacts/
+
+          # Package MSVC builds (x64 and arm64)
+          for d in artifacts/PrismLauncher-Windows-MSVC*; do
+            [ -d "$d" ] || continue
+            dirname="$(basename "$d")"
+            ARM64="$(echo -n "${dirname}" | grep -o arm64 || true)"
+            INST="$(echo -n "${dirname}" | grep -o Setup || true)"
+            PORT="$(echo -n "${dirname}" | grep -o Portable || true)"
+            NAME="PrismLauncher-Windows-MSVC"
+            test -z "${ARM64}" || NAME="${NAME}-arm64"
+            test -z "${PORT}" || NAME="${NAME}-Portable"
+
+            if [ -n "${INST}" ]; then
+              exe_file=$(find "$d" -maxdepth 2 -type f -name "PrismLauncher-*.exe" | head -n 1)
+              if [ -n "$exe_file" ]; then
+                cp "$exe_file" "release-assets/${NAME}-Setup-${VERSION}.exe"
+                echo "Added installer: ${NAME}-Setup-${VERSION}.exe"
+              fi
+            else
+              (cd "$d" && zip -rq -9 "${GITHUB_WORKSPACE}/release-assets/${NAME}-${VERSION}.zip" *)
+              echo "Added zip: ${NAME}-${VERSION}.zip"
+            fi
+          done
+
+          # Package MinGW builds
+          for d in artifacts/PrismLauncher-Windows-MinGW-w64*; do
+            [ -d "$d" ] || continue
+            dirname="$(basename "$d")"
+            INST="$(echo -n "${dirname}" | grep -o Setup || true)"
+            PORT="$(echo -n "${dirname}" | grep -o Portable || true)"
+            NAME="PrismLauncher-Windows-MinGW-w64"
+            test -z "${PORT}" || NAME="${NAME}-Portable"
+
+            if [ -n "${INST}" ]; then
+              exe_file=$(find "$d" -maxdepth 2 -type f -name "PrismLauncher-*.exe" | head -n 1)
+              if [ -n "$exe_file" ]; then
+                cp "$exe_file" "release-assets/${NAME}-Setup-${VERSION}.exe"
+                echo "Added installer: ${NAME}-Setup-${VERSION}.exe"
+              fi
+            else
+              (cd "$d" && zip -rq -9 "${GITHUB_WORKSPACE}/release-assets/${NAME}-${VERSION}.zip" *)
+              echo "Added zip: ${NAME}-${VERSION}.zip"
+            fi
+          done
+
+          # Check if assets were produced
+          asset_count=$(ls -1 release-assets/ 2>/dev/null | wc -l)
+          if [ "$asset_count" -eq 0 ]; then
+            echo "::error:: No release assets were created from build artifacts!"
+            exit 1
+          fi
+
+          # Generate SHA-256 Checksums
+          cd release-assets
+          sha256sum PrismLauncher-* > SHA256SUMS.txt
+          echo "Generated SHA256SUMS.txt:"
+          cat SHA256SUMS.txt
+
+      - name: Generate release notes body
+        shell: bash
+        run: |
+          cat << 'EOF' > release_body.md
+          ## Prism Launcher - Windows Build
+
+          Automated build and release for Windows.
+
+          ### 📦 Packages Included
+          - **`PrismLauncher-Windows-MSVC-Setup-${{ steps.info.outputs.version }}.exe`**: Windows Installer (64-bit, recommended)
+          - **`PrismLauncher-Windows-MSVC-Portable-${{ steps.info.outputs.version }}.zip`**: Portable release (64-bit)
+          - **`PrismLauncher-Windows-MSVC-${{ steps.info.outputs.version }}.zip`**: Binary archive (64-bit)
+          - **`PrismLauncher-Windows-MSVC-arm64-Setup-${{ steps.info.outputs.version }}.exe`**: Windows Installer (ARM64)
+          - **`PrismLauncher-Windows-MSVC-arm64-Portable-${{ steps.info.outputs.version }}.zip`**: Portable release (ARM64)
+          - **`PrismLauncher-Windows-MSVC-arm64-${{ steps.info.outputs.version }}.zip`**: Binary archive (ARM64)
+          - **`PrismLauncher-Windows-MinGW-w64-Setup-${{ steps.info.outputs.version }}.exe`**: MinGW Installer (64-bit)
+          - **`PrismLauncher-Windows-MinGW-w64-Portable-${{ steps.info.outputs.version }}.zip`**: MinGW Portable release (64-bit)
+          - **`PrismLauncher-Windows-MinGW-w64-${{ steps.info.outputs.version }}.zip`**: MinGW Binary archive (64-bit)
+
+          ### 🔒 Checksums (SHA-256)
+          ```text
+          EOF
+          cat release-assets/SHA256SUMS.txt >> release_body.md
+          cat << 'EOF' >> release_body.md
+          ```
+
+          ---
+          **Commit:** [`${{ steps.info.outputs.short_sha }}`](https://github.com/${{ github.repository }}/commit/${{ github.sha }}) | **Build:** #${{ steps.info.outputs.run_num }}
+          EOF
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.info.outputs.tag_name }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ steps.info.outputs.title }}
+          body_path: release_body.md
+          prerelease: ${{ steps.info.outputs.prerelease == 'true' }}
+          draft: false
+          make_latest: ${{ steps.info.outputs.prerelease != 'true' }}
+          generate_release_notes: true
+          files: release-assets/*

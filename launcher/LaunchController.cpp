@@ -101,7 +101,7 @@ void LaunchController::decideAccount()
         box.setIcon(QMessageBox::Information);
         auto* addOfflineBtn = box.addButton(tr("Add Offline"), QMessageBox::AcceptRole);
         auto* openManagerBtn = box.addButton(tr("Account Manager"), QMessageBox::ActionRole);
-        auto* cancelBtn = box.addButton(tr("Cancel"), QMessageBox::RejectRole);
+        box.addButton(tr("Cancel"), QMessageBox::RejectRole);
         box.setDefaultButton(addOfflineBtn);
 
         box.exec();
