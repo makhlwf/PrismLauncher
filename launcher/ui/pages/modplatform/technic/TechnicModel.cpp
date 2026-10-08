@@ -59,11 +59,6 @@ QVariant Technic::ListModel::data(const QModelIndex& index, int role) const
 
     Modpack pack = modpacks.at(pos);
     switch (role) {
-        case Qt::DisplayRole:
-        case Qt::AccessibleTextRole:
-            return pack.title;
-        case Qt::AccessibleDescriptionRole:
-            return pack.description;
         case Qt::ToolTipRole: {
             if (pack.description.length() > 100) {
                 // some magic to prevent to long tooltips and replace html linebreaks
@@ -86,15 +81,16 @@ QVariant Technic::ListModel::data(const QModelIndex& index, int role) const
             v.setValue(pack);
             return v;
         }
+        // Custom & Accessible data
         case Qt::DisplayRole:
-            return pack.name;
-        case Qt::SizeHintRole:
-            return QSize(0, 58);
-        // Custom data
+        case Qt::AccessibleTextRole:
         case UserDataTypes::TITLE:
             return pack.name;
+        case Qt::AccessibleDescriptionRole:
         case UserDataTypes::DESCRIPTION:
             return pack.description;
+        case Qt::SizeHintRole:
+            return QSize(0, 58);
         case UserDataTypes::INSTALLED:
             return false;
         default:
