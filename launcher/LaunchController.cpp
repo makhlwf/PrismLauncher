@@ -94,19 +94,36 @@ void LaunchController::decideAccount()
     }
 
     if (!accounts->anyAccountIsValid()) {
-        // Tell the user they need to log in at least one account in order to play.
-        auto reply = CustomMessageBox::selectable(m_parentWidget, tr("No Accounts"),
-                                                  tr("In order to play Minecraft, you must have at least one Microsoft "
-                                                     "account which owns Minecraft logged in. "
-                                                     "Would you like to open the account manager to add an account now?"),
-                                                  QMessageBox::Information, QMessageBox::Yes | QMessageBox::No)
-                         ->exec();
+        QMessageBox box(m_parentWidget);
+        box.setWindowTitle(tr("No Accounts"));
+        box.setText(tr("In order to play Minecraft, you must have at least one account added.\n\n"
+                       "Would you like to add an offline account now, or open the account manager?"));
+        box.setIcon(QMessageBox::Information);
+        auto* addOfflineBtn = box.addButton(tr("Add Offline"), QMessageBox::AcceptRole);
+        auto* openManagerBtn = box.addButton(tr("Account Manager"), QMessageBox::ActionRole);
+        auto* cancelBtn = box.addButton(tr("Cancel"), QMessageBox::RejectRole);
+        box.setDefaultButton(addOfflineBtn);
 
-        if (reply == QMessageBox::Yes) {
-            // Open the account manager.
+        box.exec();
+
+        if (box.clickedButton() == addOfflineBtn) {
+            ChooseOfflineNameDialog dialog(tr("Please enter your desired username to add your offline account."), m_parentWidget);
+            if (dialog.exec() == QDialog::Accepted) {
+                if (const MinecraftAccountPtr account = MinecraftAccount::createOffline(dialog.getUsername())) {
+                    account->login()->start();
+                    accounts->addAccount(account);
+                    accounts->setDefaultAccount(account);
+                    m_accountToUse = account;
+                }
+            } else {
+                return;
+            }
+        } else if (box.clickedButton() == openManagerBtn) {
             APPLICATION->ShowGlobalSettings(m_parentWidget, "accounts");
-        } else if (reply == QMessageBox::No) {
-            // Do not open "profile select" dialog.
+            if (!m_accountToUse) {
+                m_accountToUse = accounts->defaultAccount();
+            }
+        } else {
             return;
         }
     }
@@ -132,6 +149,11 @@ LaunchDecision LaunchController::decideLaunchMode()
 {
     if (!m_accountToUse || m_wantedLaunchMode == LaunchMode::Demo) {
         m_actualLaunchMode = LaunchMode::Demo;
+        return LaunchDecision::Continue;
+    }
+
+    if (m_accountToUse->accountType() == AccountType::Offline) {
+        m_actualLaunchMode = m_wantedLaunchMode == LaunchMode::Offline ? LaunchMode::Offline : LaunchMode::Normal;
         return LaunchDecision::Continue;
     }
 
