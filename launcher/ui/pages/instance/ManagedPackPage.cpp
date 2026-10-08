@@ -154,13 +154,9 @@ bool ManagedPackPage::runUpdateTask(InstanceTask* task)
             CustomMessageBox::selectable(this, tr("Warnings"), warnings.join('\n'), QMessageBox::Warning)->show();
         }
     });
-    connect(wrappedTask.get(), &Task::aborted, this, [this] {
-        CustomMessageBox::selectable(this, tr("Task aborted"), tr("The task has been aborted by the user."), QMessageBox::Information)
-            ->show();
-    });
 
     ProgressDialog loadDialog(this);
-    loadDialog.setSkipButton(true, tr("Abort"));
+    loadDialog.showSkipButton();
     loadDialog.execWithTask(wrappedTask.get());
 
     return wrappedTask->wasSuccessful();
@@ -217,7 +213,7 @@ void ModrinthManagedPackPage::parseManagedPack()
     m_pack = { .addonId = m_inst->getManagedPackID() };
 
     // Use default if no callbacks are set
-    callbacks.on_succeed = [this](auto& doc) {
+    callbacks.onSucceed = [this](auto& doc) {
         m_pack.versions = doc;
         m_pack.versionsLoaded = true;
 
@@ -242,14 +238,14 @@ void ModrinthManagedPackPage::parseManagedPack()
 
         m_loaded = true;
     };
-    callbacks.on_fail = [this](const QString& /*reason*/, int) { setFailState(); };
-    callbacks.on_abort = [this]() { setFailState(); };
-    m_fetchJob = m_api.getProjectVersions({ .pack = std::make_shared<ModPlatform::IndexedPack>(m_pack),
-                                            .mcVersions = {},
-                                            .loaders = {},
-                                            .resourceType = ModPlatform::ResourceType::Modpack,
-                                            .includeChangelog = true },
-                                          std::move(callbacks));
+    callbacks.onFail = [this](const QString& /*reason*/, int) { setFailState(); };
+    callbacks.onAbort = [this]() { setFailState(); };
+    m_fetchJob = ModrinthAPI::get().getProjectVersions({ .pack = std::make_shared<ModPlatform::IndexedPack>(m_pack),
+                                                         .mcVersions = {},
+                                                         .loaders = {},
+                                                         .resourceType = ModPlatform::ResourceType::Modpack,
+                                                         .includeChangelog = true },
+                                                       callbacks);
 
     ui->changelogTextBrowser->setText(tr("Fetching changelogs..."));
 
@@ -304,7 +300,7 @@ void ModrinthManagedPackPage::update()
 {
     auto customURL = m_inst->settings()->get("ManagedPackURL").toString().trimmed();
     if (m_inst->getManagedPackID().isEmpty() && !customURL.isEmpty()) {
-        updatePack(customURL);
+        updatePack(customURL, false);
         return;
     }
     auto index = ui->versionsComboBox->currentIndex();
@@ -314,7 +310,7 @@ void ModrinthManagedPackPage::update()
     }
     auto version = m_pack.versions.at(index);
 
-    updatePack(version.downloadUrl, version.fileId.toString(), version.version);
+    updatePack(version.downloadUrl, true, version.fileId.toString(), version.version);
 }
 
 void ModrinthManagedPackPage::updateFromFile()
@@ -324,7 +320,7 @@ void ModrinthManagedPackPage::updateFromFile()
         return;
     }
 
-    updatePack(output);
+    updatePack(output, false);
 }
 
 // FLAME
@@ -374,7 +370,7 @@ void FlameManagedPackPage::parseManagedPack()
     ResourceAPI::Callback<QVector<ModPlatform::IndexedVersion>> callbacks{};
 
     // Use default if no callbacks are set
-    callbacks.on_succeed = [this](auto& doc) {
+    callbacks.onSucceed = [this](auto& doc) {
         m_pack.versions = doc;
         m_pack.versionsLoaded = true;
 
@@ -397,14 +393,14 @@ void FlameManagedPackPage::parseManagedPack()
 
         m_loaded = true;
     };
-    callbacks.on_fail = [this](const QString& /*reason*/, int) { setFailState(); };
-    callbacks.on_abort = [this]() { setFailState(); };
-    m_fetchJob = m_api.getProjectVersions({ .pack = std::make_shared<ModPlatform::IndexedPack>(m_pack),
-                                            .mcVersions = {},
-                                            .loaders = {},
-                                            .resourceType = ModPlatform::ResourceType::Modpack,
-                                            .includeChangelog = true },
-                                          std::move(callbacks));
+    callbacks.onFail = [this](const QString& /*reason*/, int) { setFailState(); };
+    callbacks.onAbort = [this]() { setFailState(); };
+    m_fetchJob = FlameAPI::get().getProjectVersions({ .pack = std::make_shared<ModPlatform::IndexedPack>(m_pack),
+                                                      .mcVersions = {},
+                                                      .loaders = {},
+                                                      .resourceType = ModPlatform::ResourceType::Modpack,
+                                                      .includeChangelog = true },
+                                                    callbacks);
 
     m_fetchJob->start();
 }
@@ -425,7 +421,7 @@ void FlameManagedPackPage::suggestVersion()
     auto version = m_pack.versions.at(index);
 
     ui->changelogTextBrowser->setHtml(
-        StringUtils::htmlListPatch(m_api.getModFileChangelog(m_inst->getManagedPackID().toInt(), version.fileId.toInt())));
+        StringUtils::htmlListPatch(FlameAPI::getModFileChangelog(m_inst->getManagedPackID().toInt(), version.fileId.toInt())));
 
     ManagedPackPage::suggestVersion();
 }
@@ -434,7 +430,7 @@ void FlameManagedPackPage::update()
 {
     auto customURL = m_inst->settings()->get("ManagedPackURL").toString().trimmed();
     if (m_inst->getManagedPackID().isEmpty() && !customURL.isEmpty()) {
-        updatePack(customURL);
+        updatePack(customURL, false);
         return;
     }
     auto index = ui->versionsComboBox->currentIndex();
@@ -444,7 +440,7 @@ void FlameManagedPackPage::update()
     }
     auto version = m_pack.versions.at(index);
 
-    updatePack(version.downloadUrl, version.fileId.toString());
+    updatePack(version.downloadUrl, true, version.fileId.toString());
 }
 
 void FlameManagedPackPage::updateFromFile()
@@ -454,18 +450,40 @@ void FlameManagedPackPage::updateFromFile()
         return;
     }
 
-    updatePack(output);
+    updatePack(output, false);
 }
 
-void ManagedPackPage::updatePack(const QUrl& url, const QString& versionID, const QString& versionName)
+void ManagedPackPage::updatePack(const QUrl& url, bool trusted, const QString& versionID, const QString& versionName)
 {
+    QString confirmMessage;
+    if (versionID.isEmpty()) {
+        confirmMessage =
+            tr("You are about to update the modpack to a new version.\n"
+               "Irreversible changes may be made to the instance's files.\n"
+               "As such, it is strongly recommended to create a backup copy of the instance.\n\n"
+               "Are you sure?");
+    } else {
+        confirmMessage = tr("You are about to update the modpack to version \"%1\".\n"
+                            "Irreversible changes may be made to the instance's files.\n"
+                            "As such, it is strongly recommended to create a backup copy of the instance.\n\n"
+                            "Are you sure?")
+                             .arg(versionName);
+    }
+
+    auto response = CustomMessageBox::selectable(this, tr("Confirm Update"), confirmMessage, QMessageBox::Warning,
+                                                 QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+                        ->exec();
+    if (response != QMessageBox::Yes) {
+        return;
+    }
+
     QMap<QString, QString> extraInfo;
     // NOTE: Don't use 'm_pack.id' here, since we didn't completely parse all the metadata for the pack, including this field.
     extraInfo.insert("pack_id", m_inst->getManagedPackID());
     extraInfo.insert("pack_version_id", versionID);
     extraInfo.insert("original_instance_id", m_inst->id());
 
-    auto* extracted = new InstanceImportTask(url, this, std::move(extraInfo));
+    auto* extracted = new InstanceImportTask(url, trusted, this, std::move(extraInfo));
 
     if (versionName.isEmpty()) {
         extracted->setName(m_inst->name());

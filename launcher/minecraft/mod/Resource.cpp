@@ -1,6 +1,5 @@
 #include "Resource.h"
 
-#include <QDirIterator>
 #include <QFileInfo>
 #include <QObject>
 #include <QRegularExpression>
@@ -9,6 +8,7 @@
 
 #include "FileSystem.h"
 #include "StringUtils.h"
+#include "Version.h"
 #include "minecraft/MinecraftInstance.h"
 #include "minecraft/PackProfile.h"
 
@@ -49,7 +49,7 @@ void Resource::parseFile()
     m_internalId = fileName;
 
     std::tie(m_sizeStr, m_sizeInfo) = calculateFileSize(m_fileInfo);
-    m_hardLinkCount = FS::hardLinkCount(m_fileInfo.absoluteFilePath());
+    m_hardLinkCount = m_fileInfo.exists() ? FS::hardLinkCount(m_fileInfo.absoluteFilePath()) : 0;
     if (m_fileInfo.isDir()) {
         m_type = ResourceType::FOLDER;
         m_name = fileName;
@@ -105,13 +105,27 @@ auto Resource::provider() const -> QString
     return QObject::tr("Unknown");
 }
 
+auto Resource::version() const -> QString
+{
+    if (metadata()) {
+        return metadata()->versionNumber;
+    }
+
+    return QObject::tr("Unknown");
+}
+
 auto Resource::homepage() const -> QString
 {
     if (metadata()) {
-        return ModPlatform::getMetaURL(metadata()->provider, metadata()->project_id);
+        return ModPlatform::getMetaURL(metadata()->provider, metadata()->projectId);
     }
 
     return {};
+}
+
+bool Resource::lockUpdate() const
+{
+    return metadata() && metadata()->lockUpdate;
 }
 
 void Resource::setMetadata(std::shared_ptr<Metadata::ModStruct>&& metadata)
@@ -135,7 +149,7 @@ QStringList Resource::issues() const
     return result;
 }
 
-void Resource::updateIssues(const BaseInstance* inst)
+void Resource::updateIssues(const MinecraftInstance* inst)
 {
     m_issues.clear();
 
@@ -143,12 +157,7 @@ void Resource::updateIssues(const BaseInstance* inst)
         return;
     }
 
-    const auto* mcInst = dynamic_cast<const MinecraftInstance*>(inst);
-    if (mcInst == nullptr) {
-        return;
-    }
-
-    auto* profile = mcInst->getPackProfile();
+    auto* profile = inst->getPackProfile();
     QString mcVersion = profile->getComponentVersion("net.minecraft");
 
     if (!m_metadata->mcVersions.empty() && !m_metadata->mcVersions.contains(mcVersion)) {
@@ -209,10 +218,28 @@ int Resource::compare(const Resource& other, SortType type) const
             break;
         }
 
+        case SortType::Version: {
+            auto thisVer = Version(version());
+            auto otherVer = Version(other.version());
+            if (thisVer > otherVer) {
+                return 1;
+            }
+            if (thisVer < otherVer) {
+                return -1;
+            }
+            break;
+        }
+
         case SortType::Provider: {
             auto compareResult = QString::compare(provider(), other.provider(), Qt::CaseInsensitive);
             if (compareResult != 0) {
                 return compareResult;
+            }
+            break;
+        }
+        case SortType::LockUpdate: {
+            if (lockUpdate() != other.lockUpdate()) {
+                return lockUpdate() ? -1 : 1;
             }
             break;
         }

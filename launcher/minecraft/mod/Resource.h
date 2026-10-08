@@ -45,7 +45,7 @@
 
 #include "MetadataHandler.h"
 
-class BaseInstance;
+class MinecraftInstance;
 
 enum class ResourceType : std::uint8_t {
     UNKNOWN,     //!< Indicates an unspecified resource type.
@@ -81,6 +81,7 @@ enum class SortType : std::uint8_t {
     Requires,
     RequiredBy,
     Filename,
+    LockUpdate
 };
 
 enum class EnableAction : std::uint8_t { ENABLE, DISABLE, TOGGLE };
@@ -97,9 +98,9 @@ class Resource {
 
    public:
     using Ptr = std::shared_ptr<Resource>;
-    Resource(const QFileInfo& fileInfo);
+    explicit Resource(const QFileInfo& fileInfo);
 
-    Resource(const QString& filePath) : Resource(QFileInfo(filePath)) {}
+    explicit Resource(const QString& filePath) : Resource(QFileInfo(filePath)) {}
 
     virtual ~Resource() = default;
 
@@ -122,7 +123,9 @@ class Resource {
     auto metadata() -> std::shared_ptr<Metadata::ModStruct> { return m_metadata; }
     auto metadata() const -> std::shared_ptr<const Metadata::ModStruct> { return m_metadata; }
     auto provider() const -> QString;
+    virtual auto version() const -> QString;
     virtual auto homepage() const -> QString;
+    bool lockUpdate() const;
 
     void setStatus(ResourceStatus status) { m_status = status; }
     void setMetadata(std::shared_ptr<Metadata::ModStruct>&& metadata);
@@ -133,7 +136,7 @@ class Resource {
      * This is initially empty, and may be updated when calling updateIssues.
      */
     QStringList issues() const;
-    void updateIssues(const BaseInstance* inst);
+    void updateIssues(const MinecraftInstance* inst);
     bool hasIssues() const { return !m_issues.empty(); }
 
     /** Compares two Resources, for sorting purposes, considering a ascending order, returning:

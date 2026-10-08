@@ -70,7 +70,7 @@ bool shouldStopOnConsoleOverflow(SettingsObject* settings)
 }
 
 BaseInstance::BaseInstance(SettingsObject* globalSettings, std::unique_ptr<SettingsObject> settings, QString rootDir)
-    : m_rootDir(std::move(rootDir)), m_settings(std::move(settings)), m_global_settings(globalSettings)
+    : m_rootDir(std::move(rootDir)), m_settings(std::move(settings)), m_globalSettings(globalSettings)
 {
     m_settings->registerSetting("name", "Unnamed Instance");
     m_settings->registerSetting("iconKey", "default");
@@ -86,8 +86,12 @@ BaseInstance::BaseInstance(SettingsObject* globalSettings, std::unique_ptr<Setti
     m_settings->registerSetting("linkedInstances", "[]");
     m_settings->registerSetting("shortcuts", QString());
     m_settings->registerSetting("uuid", QString());
-    if (m_settings->get("uuid").toString().isEmpty()) {
+
+    const auto savedUUID = m_settings->get("uuid").toString();
+    if (savedUUID.isEmpty()) {
         regenerateUuid();
+    } else {
+        m_uuid = savedUUID;
     }
 
     // Game time override
@@ -104,6 +108,7 @@ BaseInstance::BaseInstance(SettingsObject* globalSettings, std::unique_ptr<Setti
 
     // Custom Commands
     auto commandSetting = m_settings->registerSetting({ "OverrideCommands", "OverrideLaunchCmd" }, false);
+    m_settings->registerOverride(globalSettings->getSetting("PreLoadCommand"), commandSetting);
     m_settings->registerOverride(globalSettings->getSetting("PreLaunchCommand"), commandSetting);
     m_settings->registerOverride(globalSettings->getSetting("WrapperCommand"), commandSetting);
     m_settings->registerOverride(globalSettings->getSetting("PostExitCommand"), commandSetting);
@@ -133,6 +138,11 @@ BaseInstance::BaseInstance(SettingsObject* globalSettings, std::unique_ptr<Setti
 QString BaseInstance::getPreLaunchCommand()
 {
     return settings()->get("PreLaunchCommand").toString();
+}
+
+QString BaseInstance::getPreLoadCommand()
+{
+    return settings()->get("PreLoadCommand").toString();
 }
 
 QString BaseInstance::getWrapperCommand()
@@ -187,6 +197,12 @@ void BaseInstance::setManagedPack(const QString& type,
     m_settings->set("ManagedPackName", name);
     m_settings->set("ManagedPackVersionID", versionId);
     m_settings->set("ManagedPackVersionName", version);
+
+    if (APPLICATION->settings()->get("AutomaticJavaSwitch").toBool() && m_settings->get("AutomaticJava").toBool() &&
+        m_settings->get("OverrideJavaLocation").toBool()) {
+        m_settings->set("OverrideJavaLocation", false);
+        m_settings->set("JavaPath", "");
+    }
 }
 
 QStringList BaseInstance::getLinkedInstances() const
@@ -224,7 +240,7 @@ bool BaseInstance::isLinkedToInstanceId(const QString& id) const
 void BaseInstance::iconUpdated(const QString& key)
 {
     if (iconKey() == key) {
-        emit propertiesChanged(this);
+        emit propertiesChanged();
     }
 }
 
@@ -253,14 +269,11 @@ QString BaseInstance::id() const
     return QFileInfo(instanceRoot()).fileName();
 }
 
-QString BaseInstance::uuid() const
-{
-    return m_settings->get("uuid").toString();
-}
-
 void BaseInstance::regenerateUuid()
 {
-    m_settings->set("uuid", QUuid::createUuid().toString(QUuid::Id128));
+    const auto newUUID = QUuid::createUuid().toString(QUuid::Id128);
+    m_settings->set("uuid", newUUID);
+    m_uuid = newUUID;
 }
 
 bool BaseInstance::isRunning() const
@@ -290,12 +303,18 @@ void BaseInstance::setMinecraftRunning(bool running)
         setLastLaunch(m_timeStarted.toMSecsSinceEpoch());
     } else {
         QDateTime timeEnded = QDateTime::currentDateTime();
+        qint64 secondsPlayed = m_timeStarted.secsTo(timeEnded);
 
         qint64 current = settings()->get("totalTimePlayed").toLongLong();
-        settings()->set("totalTimePlayed", current + m_timeStarted.secsTo(timeEnded));
-        settings()->set("lastTimePlayed", m_timeStarted.secsTo(timeEnded));
+        settings()->set("totalTimePlayed", current + secondsPlayed);
+        settings()->set("lastTimePlayed", secondsPlayed);
 
-        emit propertiesChanged(this);
+        if (countTimePlayed()) {
+            qint64 globalTotal = APPLICATION->playtimeSettings()->get("TotalPlayTime").toLongLong();
+            APPLICATION->playtimeSettings()->set("TotalPlayTime", globalTotal + secondsPlayed);
+        }
+
+        emit propertiesChanged();
     }
 }
 
@@ -365,7 +384,7 @@ void BaseInstance::setLastLaunch(qint64 val)
 {
     // FIXME: if no change, do not set. setting involves saving a file.
     m_settings->set("lastLaunchTime", val);
-    emit propertiesChanged(this);
+    emit propertiesChanged();
 }
 
 void BaseInstance::setNotes(const QString& val)
@@ -383,7 +402,7 @@ void BaseInstance::setIconKey(const QString& val)
 {
     // FIXME: if no change, do not set. setting involves saving a file.
     m_settings->set("iconKey", val);
-    emit propertiesChanged(this);
+    emit propertiesChanged();
 }
 
 QString BaseInstance::iconKey() const
@@ -395,7 +414,7 @@ void BaseInstance::setName(const QString& val)
 {
     // FIXME: if no change, do not set. setting involves saving a file.
     m_settings->set("name", val);
-    emit propertiesChanged(this);
+    emit propertiesChanged();
 }
 
 bool BaseInstance::syncInstanceDirName(const QString& newRoot) const
@@ -428,14 +447,13 @@ void BaseInstance::setShortcuts(const QList<ShortcutData>& shortcuts)
 QList<ShortcutData> BaseInstance::shortcuts() const
 {
     auto data = m_settings->get("shortcuts").toString().toUtf8();
-    QJsonParseError parseError;
-    auto document = QJsonDocument::fromJson(data, &parseError);
-    if (parseError.error != QJsonParseError::NoError || !document.isArray()) {
+    auto document = Json::requireArray(data);
+    if (!document) {
         return {};
     }
 
     QList<ShortcutData> results;
-    for (const auto& elem : document.array()) {
+    for (const auto& elem : document.value()) {
         if (!elem.isObject()) {
             continue;
         }
@@ -454,7 +472,7 @@ QList<ShortcutData> BaseInstance::shortcuts() const
             qWarning() << "Shortcut" << shortcutName << "for instance" << name() << "have non-existent path" << filePath;
             continue;
         }
-        results.append({ shortcutName, filePath, static_cast<ShortcutTarget>(value) });
+        results.append({ .name = shortcutName, .filePath = filePath, .target = static_cast<ShortcutTarget>(value) });
     }
     return results;
 }

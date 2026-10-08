@@ -110,8 +110,8 @@ class BaseInstance : public QObject {
 
     /// The instance's ID. The ID SHALL be determined by LAUNCHER internally. The ID IS guaranteed to
     /// be unique.
-    virtual QString id() const;
-    virtual QString uuid() const;
+    QString id() const;
+    QString uuid() const { return m_uuid; }
     void regenerateUuid();
 
     void setMinecraftRunning(bool running);
@@ -154,6 +154,7 @@ class BaseInstance : public QObject {
     QString notes() const;
     void setNotes(const QString& val);
 
+    QString getPreLoadCommand();
     QString getPreLaunchCommand();
     QString getPostExitCommand();
     QString getWrapperCommand();
@@ -223,8 +224,6 @@ class BaseInstance : public QObject {
     /// get variables this instance exports
     virtual QMap<QString, QString> getVariables() = 0;
 
-    virtual QString typeName() const = 0;
-
     virtual void updateRuntimeContext();
     RuntimeContext runtimeContext() const { return m_runtimeContext; }
 
@@ -233,16 +232,7 @@ class BaseInstance : public QObject {
     {
         if (m_hasBrokenVersion != value) {
             m_hasBrokenVersion = value;
-            emit propertiesChanged(this);
-        }
-    }
-
-    bool hasUpdateAvailable() const { return m_hasUpdate; }
-    void setUpdateAvailable(bool value)
-    {
-        if (m_hasUpdate != value) {
-            m_hasUpdate = value;
-            emit propertiesChanged(this);
+            emit propertiesChanged();
         }
     }
 
@@ -251,7 +241,7 @@ class BaseInstance : public QObject {
     {
         if (m_crashed != value) {
             m_crashed = value;
-            emit propertiesChanged(this);
+            emit propertiesChanged();
         }
     }
 
@@ -281,16 +271,16 @@ class BaseInstance : public QObject {
    protected:
     void changeStatus(Status newStatus);
 
-    SettingsObject* globalSettings() const { return m_global_settings; }
+    SettingsObject* globalSettings() const { return m_globalSettings; }
 
-    bool isSpecificSettingsLoaded() const { return m_specific_settings_loaded; }
-    void setSpecificSettingsLoaded(bool loaded) { m_specific_settings_loaded = loaded; }
+    bool isSpecificSettingsLoaded() const { return m_specificSettingsLoaded; }
+    void setSpecificSettingsLoaded(bool loaded) { m_specificSettingsLoaded = loaded; }
 
    signals:
     /*!
      * \brief Signal emitted when properties relevant to the instance view change
      */
-    void propertiesChanged(BaseInstance* inst);
+    void propertiesChanged();
 
     void launchTaskChanged(LaunchTask*);
 
@@ -313,13 +303,13 @@ class BaseInstance : public QObject {
     RuntimeContext m_runtimeContext;
 
    private: /* data */
+    QString m_uuid;
     Status m_status = Status::Present;
     bool m_crashed = false;
-    bool m_hasUpdate = false;
     bool m_hasBrokenVersion = false;
 
-    SettingsObject* m_global_settings;
-    bool m_specific_settings_loaded = false;
+    SettingsObject* m_globalSettings;
+    bool m_specificSettingsLoaded = false;
 };
 
 Q_DECLARE_METATYPE(shared_qobject_ptr<BaseInstance>)

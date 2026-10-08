@@ -53,15 +53,16 @@
 #include "settings/INISettingsObject.h"
 #include "tasks/Task.h"
 
-#include "net/ApiDownload.h"
+#include "net/ApiRequest.h"
 
+#include <QDirListing>
 #include <QFileInfo>
 #include <QtConcurrentRun>
 #include <memory>
 #include <utility>
 
-InstanceImportTask::InstanceImportTask(QUrl sourceUrl, QWidget* parent, QMap<QString, QString> extraInfo)
-    : m_sourceUrl(std::move(sourceUrl)), m_extra_info(std::move(extraInfo)), m_parent(parent)
+InstanceImportTask::InstanceImportTask(QUrl sourceUrl, bool trustedSource, QWidget* parent, QMap<QString, QString> extraInfo)
+    : m_sourceUrl(std::move(sourceUrl)), m_trustedSource(trustedSource), m_extraInfo(std::move(extraInfo)), m_parent(parent)
 {}
 
 bool InstanceImportTask::abort()
@@ -100,7 +101,7 @@ void InstanceImportTask::downloadFromUrl()
     m_archivePath = entry->getFullPath();
 
     auto filesNetJob = makeShared<NetJob>(tr("Modpack download"), APPLICATION->network());
-    filesNetJob->addNetAction(Net::ApiDownload::makeCached(m_sourceUrl, entry));
+    filesNetJob->addNetAction(Net::ApiRequest::makeCached(m_sourceUrl, entry));
 
     connect(filesNetJob.get(), &NetJob::succeeded, this, &InstanceImportTask::processZipPack);
     connect(filesNetJob.get(), &NetJob::progress, this, &InstanceImportTask::setProgress);
@@ -139,9 +140,8 @@ void InstanceImportTask::processZipPack()
     // NOTE: Prioritize modpack platforms that aren't searched for recursively.
     // Especially Flame has a very common filename for its manifest, which may appear inside overrides for example
     // https://docs.modrinth.com/docs/modpacks/format_definition/#storage
-    auto detectInstance = [this, &extractDir, &root](MMCZip::ArchiveReader::File* f, bool& stop) {
+    auto detectInstance = [this, &extractDir, &root](MMCZip::ArchiveReader::File* f) -> Result<bool> {
         if (!isRunning()) {
-            stop = true;
             return true;
         }
         auto fileName = f->filename();
@@ -149,26 +149,26 @@ void InstanceImportTask::processZipPack()
             // process as Modrinth pack
             qDebug() << "Modrinth:" << true;
             m_modpackType = ModpackType::Modrinth;
-            stop = true;
+            return true;
         } else if (fileName == "bin/modpack.jar" || fileName == "bin/version.json") {
             // process as Technic pack
             qDebug() << "Technic:" << true;
             extractDir.mkpath("minecraft");
             extractDir.cd("minecraft");
             m_modpackType = ModpackType::Technic;
-            stop = true;
+            return true;
         } else if (fileName == "manifest.json") {
             qDebug() << "Flame:" << true;
             m_modpackType = ModpackType::Flame;
-            stop = true;
+            return true;
         } else if (QFileInfo fileInfo(fileName); fileInfo.fileName() == "instance.cfg") {
             qDebug() << "MultiMC:" << true;
             m_modpackType = ModpackType::MultiMC;
             root = cleanPath(fileInfo.path());
-            stop = true;
+            return true;
         }
         QCoreApplication::processEvents();
-        return true;
+        return false;
     };
     if (!packZip.parse(detectInstance)) {
         emitFailed(tr("Unable to open supplied modpack zip file."));
@@ -214,14 +214,10 @@ void InstanceImportTask::processZipPack()
 void InstanceImportTask::extractFinished()
 {
     setAbortable(false);
-    QDir extractDir(m_stagingPath);
 
     qDebug() << "Fixing permissions for extracted pack files...";
-    QDirIterator it(extractDir, QDirIterator::Subdirectories);
-    while (it.hasNext()) {
-        auto filepath = it.next();
-        QFileInfo file(filepath);
-        auto permissions = QFile::permissions(filepath);
+    for (const auto& file : QDirListing(m_stagingPath, QDirListing::IteratorFlag::ResolveSymlinks | QDirListing::IteratorFlag::Recursive)) {
+        auto permissions = QFile::permissions(file.absoluteFilePath());
         auto origPermissions = permissions;
         if (file.isDir()) {
             // Folder +rwx for current user
@@ -231,10 +227,10 @@ void InstanceImportTask::extractFinished()
             permissions |= QFileDevice::Permission::ReadUser | QFileDevice::Permission::WriteUser;
         }
         if (origPermissions != permissions) {
-            if (!QFile::setPermissions(filepath, permissions)) {
-                logWarning(tr("Could not fix permissions for %1").arg(filepath));
+            if (!QFile::setPermissions(file.absoluteFilePath(), permissions)) {
+                logWarning(tr("Could not fix permissions for %1").arg(file.absoluteFilePath()));
             } else {
-                qDebug() << "Fixed" << filepath;
+                qDebug() << "Fixed" << file.absoluteFilePath();
             }
         }
     }
@@ -285,26 +281,26 @@ bool installIcon(const QString& root, const QString& instIconKey)
 void InstanceImportTask::processFlame()
 {
     shared_qobject_ptr<FlameCreationTask> instCreationTask = nullptr;
-    if (!m_extra_info.isEmpty()) {
-        auto packIdIt = m_extra_info.constFind("pack_id");
-        Q_ASSERT(packIdIt != m_extra_info.constEnd());
+    if (!m_extraInfo.isEmpty()) {
+        auto packIdIt = m_extraInfo.constFind("pack_id");
+        Q_ASSERT(packIdIt != m_extraInfo.constEnd());
         const auto& packId = packIdIt.value();
 
-        auto packVersionIdIt = m_extra_info.constFind("pack_version_id");
-        Q_ASSERT(packVersionIdIt != m_extra_info.constEnd());
+        auto packVersionIdIt = m_extraInfo.constFind("pack_version_id");
+        Q_ASSERT(packVersionIdIt != m_extraInfo.constEnd());
         const auto& packVersionId = packVersionIdIt.value();
 
         QString originalInstanceId;
-        auto originalInstanceIdIt = m_extra_info.constFind("original_instance_id");
-        if (originalInstanceIdIt != m_extra_info.constEnd()) {
+        auto originalInstanceIdIt = m_extraInfo.constFind("original_instance_id");
+        if (originalInstanceIdIt != m_extraInfo.constEnd()) {
             originalInstanceId = originalInstanceIdIt.value();
         }
 
-        instCreationTask =
-            makeShared<FlameCreationTask>(m_stagingPath, m_globalSettings, m_parent, packId, packVersionId, originalInstanceId);
+        instCreationTask = makeShared<FlameCreationTask>(m_stagingPath, m_trustedSource, m_globalSettings, m_parent, packId, packVersionId,
+                                                         originalInstanceId);
     } else {
         // FIXME: Find a way to get IDs in directly imported ZIPs
-        instCreationTask = makeShared<FlameCreationTask>(m_stagingPath, m_globalSettings, m_parent, QString(), QString());
+        instCreationTask = makeShared<FlameCreationTask>(m_stagingPath, m_trustedSource, m_globalSettings, m_parent, QString(), QString());
     }
 
     instCreationTask->setName(modifiedName());
@@ -363,6 +359,9 @@ void InstanceImportTask::processMultiMC()
     // reset time played on import... because packs.
     instance.resetTimePlayed();
 
+    // UUID is carried over on export, but this is a distinct instance, so give it its own
+    instance.regenerateUuid();
+
     // set a new nice name
     instance.setName(name());
 
@@ -380,25 +379,25 @@ void InstanceImportTask::processMultiMC()
 void InstanceImportTask::processModrinth()
 {
     shared_qobject_ptr<ModrinthCreationTask> instCreationTask = nullptr;
-    if (!m_extra_info.isEmpty()) {
-        auto packIdIt = m_extra_info.constFind("pack_id");
-        Q_ASSERT(packIdIt != m_extra_info.constEnd());
+    if (!m_extraInfo.isEmpty()) {
+        auto packIdIt = m_extraInfo.constFind("pack_id");
+        Q_ASSERT(packIdIt != m_extraInfo.constEnd());
         const auto& packId = packIdIt.value();
 
         QString packVersionId;
-        auto packVersionIdIt = m_extra_info.constFind("pack_version_id");
-        if (packVersionIdIt != m_extra_info.constEnd()) {
+        auto packVersionIdIt = m_extraInfo.constFind("pack_version_id");
+        if (packVersionIdIt != m_extraInfo.constEnd()) {
             packVersionId = packVersionIdIt.value();
         }
 
         QString originalInstanceId;
-        auto originalInstanceIdIt = m_extra_info.constFind("original_instance_id");
-        if (originalInstanceIdIt != m_extra_info.constEnd()) {
+        auto originalInstanceIdIt = m_extraInfo.constFind("original_instance_id");
+        if (originalInstanceIdIt != m_extraInfo.constEnd()) {
             originalInstanceId = originalInstanceIdIt.value();
         }
 
-        instCreationTask =
-            makeShared<ModrinthCreationTask>(m_stagingPath, m_globalSettings, m_parent, packId, packVersionId, originalInstanceId);
+        instCreationTask = makeShared<ModrinthCreationTask>(m_stagingPath, m_trustedSource, m_globalSettings, m_parent, packId,
+                                                            packVersionId, originalInstanceId);
     } else {
         QString packId;
         if (!m_sourceUrl.isEmpty()) {
@@ -407,7 +406,7 @@ void InstanceImportTask::processModrinth()
         }
 
         // FIXME: Find a way to get the ID in directly imported ZIPs
-        instCreationTask = makeShared<ModrinthCreationTask>(m_stagingPath, m_globalSettings, m_parent, packId);
+        instCreationTask = makeShared<ModrinthCreationTask>(m_stagingPath, m_trustedSource, m_globalSettings, m_parent, packId);
     }
 
     instCreationTask->setName(modifiedName());
